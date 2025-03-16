@@ -1,12 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"runtime"
 	"time"
 
 	"github.com/XIU2/CloudflareSpeedTest/task"
@@ -21,8 +19,6 @@ func init() {
 	var printVersion bool
 	var help = `
 CloudflareSpeedTest ` + version + `
-测试 Cloudflare CDN 所有 IP 的延迟和速度，获取最快 IP (IPv4+IPv6)！
-https://github.com/XIU2/CloudflareSpeedTest
 
 参数：
     -n 200
@@ -35,7 +31,7 @@ https://github.com/XIU2/CloudflareSpeedTest
         下载测速时间；单个 IP 下载测速最长时间，不能太短；(默认 10 秒)
     -tp 443
         指定测速端口；延迟测速/下载测速时使用的端口；(默认 443 端口)
-    -url https://cf.xiu2.xyz/url
+    -url https://speed.cloudflare.com/__down?bytes=200000000
         指定测速地址；延迟测速(HTTPing)/下载测速时使用的地址，默认地址不保证可用性，建议自建；
 
     -httping
@@ -63,6 +59,9 @@ https://github.com/XIU2/CloudflareSpeedTest
     -o result.csv
         写入结果文件；如路径含有空格请加上引号；值为空时不写入文件 [-o ""]；(默认 result.csv)
 
+    -dm 200
+        延迟测速数量；延迟测速时的最大IP数量限制；(默认 200)
+
     -dd
         禁用下载测速；禁用后测速结果会按延迟排序 (默认按下载速度排序)；(默认 启用)
     -allip
@@ -80,7 +79,7 @@ https://github.com/XIU2/CloudflareSpeedTest
 	flag.IntVar(&task.TestCount, "dn", 10, "下载测速数量")
 	flag.IntVar(&downloadTime, "dt", 10, "下载测速时间")
 	flag.IntVar(&task.TCPPort, "tp", 443, "指定测速端口")
-	flag.StringVar(&task.URL, "url", "https://cf.xiu2.xyz/url", "指定测速地址")
+	flag.StringVar(&task.URL, "url", "https://speed.cloudflare.com/__down?bytes=200000000", "指定测速地址")
 
 	flag.BoolVar(&task.Httping, "httping", false, "切换测速模式")
 	flag.IntVar(&task.HttpingStatusCode, "httping-code", 0, "有效状态代码")
@@ -90,6 +89,7 @@ https://github.com/XIU2/CloudflareSpeedTest
 	flag.IntVar(&minDelay, "tll", 0, "平均延迟下限")
 	flag.Float64Var(&maxLossRate, "tlr", 1, "丢包几率上限")
 	flag.Float64Var(&task.MinSpeed, "sl", 0, "下载速度下限")
+	flag.IntVar(&utils.MaxIPCount, "dm", 200, "延迟测速数量")
 
 	flag.IntVar(&utils.PrintNum, "p", 10, "显示结果数量")
 	flag.StringVar(&task.IPFile, "f", "ip.txt", "IP段数据文件")
@@ -115,12 +115,12 @@ https://github.com/XIU2/CloudflareSpeedTest
 	if printVersion {
 		println(version)
 		fmt.Println("检查版本更新中...")
-		checkUpdate()
-		if versionNew != "" {
-			fmt.Printf("*** 发现新版本 [%s]！请前往 [https://github.com/XIU2/CloudflareSpeedTest] 更新！ ***", versionNew)
-		} else {
-			fmt.Println("当前为最新版本 [" + version + "]！")
-		}
+		//checkUpdate()
+		//if versionNew != "" {
+		//	fmt.Printf("*** 发现新版本 [%s]！请前往 [https://github.com/XIU2/CloudflareSpeedTest] 更新！ ***", versionNew)
+		//} else {
+		fmt.Println("当前为最新版本 [" + version + "]！")
+		//}
 		os.Exit(0)
 	}
 }
@@ -128,47 +128,176 @@ https://github.com/XIU2/CloudflareSpeedTest
 func main() {
 	task.InitRandSeed() // 置随机数种子
 
-	fmt.Printf("# XIU2/CloudflareSpeedTest %s \n\n", version)
+	//fmt.Printf("# XIU2/CloudflareSpeedTest %s \n\n", version)
 
 	// 开始延迟测速 + 过滤延迟/丢包
 	pingData := task.NewPing().Run().FilterDelay().FilterLossRate()
 	// 开始下载测速
 	speedData := task.TestDownloadSpeed(pingData)
-	utils.ExportCsv(speedData) // 输出文件
-	speedData.Print()          // 打印结果
+	// utils.ExportCsv(speedData)  // 输出文件
+	// saveFormattedIPs(speedData) // 输出节点到文件 result.txt
+	// //saveToStash()               //发送到缓存upStash
+	// generateClashConfig(speedData) // 生成clash配置文件
+	speedData.Print() // 打印结果
+	printIpPortJson(speedData)
 
-	if versionNew != "" {
-		fmt.Printf("\n*** 发现新版本 [%s]！请前往 [https://github.com/XIU2/CloudflareSpeedTest] 更新！ ***\n", versionNew)
-	}
-	endPrint()
+	//if versionNew != "" {
+	//	fmt.Printf("\n*** 发现新版本 [%s]！请前往 [https://github.com/XIU2/CloudflareSpeedTest] 更新！ ***\n", versionNew)
+	//}
+	//endPrint()
 }
 
-func endPrint() {
-	if utils.NoPrintResult() {
+// 新增一个打印方法，打印输出ip和port的json格式，参数为speedData
+func printIpPortJson(speedData utils.DownloadSpeedSet) {
+	type IPInfo struct {
+		IP            string `json:"ip"`
+		Port          int    `json:"port"`
+		Delay         int    `json:"delay"`
+		DownloadSpeed int    `json:"downloadSpeed"`
+	}
+
+	var result []IPInfo
+	for _, data := range speedData {
+		info := IPInfo{
+			IP:            data.IP.String(),
+			Port:          443,
+			Delay:         int(data.Delay / 1000000),
+			DownloadSpeed: int(data.DownloadSpeed / 1024 / 1024),
+		}
+		result = append(result, info)
+	}
+
+	jsonData, err := json.MarshalIndent(result, "", "    ")
+	if err != nil {
+		fmt.Printf("Error marshaling JSON: %v\n", err)
 		return
 	}
-	if runtime.GOOS == "windows" { // 如果是 Windows 系统，则需要按下 回车键 或 Ctrl+C 退出（避免通过双击运行时，测速完毕后直接关闭）
-		fmt.Printf("按下 回车键 或 Ctrl+C 退出。")
-		fmt.Scanln()
+
+	err = os.WriteFile("result.json", jsonData, 0644)
+	if err != nil {
+		fmt.Printf("Error writing file: %v\n", err)
+		return
 	}
 }
+
+// 实现curl -X POST -d '$VALUE' https://us1-merry-cat-32748.upstash.io/set/foo -H "Authorization: Bearer 2553feg6a2d9842h2a0gcdb5f8efe9934"
+// func saveToStash() {
+// 	// 解析 Redis URL
+// 	opt, _ := redis.ParseURL("rediss://default:AaUbAAIjcDFjMDllNjRjMDUwMDE0ZDBmYjkwNWRkY2ViNDJkMjgxZnAxMA@holy-cobra-42267.upstash.io:6379")
+// 	client := redis.NewClient(opt)
+
+// 	// 从 uuid.txt 文件读取 key
+// 	uuidBytes, err := os.ReadFile("uuid.txt")
+// 	if err != nil {
+// 		log.Fatalf("无法读取 uuid.txt 文件: %v", err)
+// 	}
+// 	key := string(uuidBytes)
+
+// 	// 从 result.txt 文件读取 value
+// 	resultBytes, err := os.ReadFile("result.txt")
+// 	if err != nil {
+// 		log.Fatalf("无法读取 result.txt 文件: %v", err)
+// 	}
+// 	value := string(resultBytes)
+
+// 	// 设置 Redis key-value
+// 	client.Set(key, value, 0)
+// }
+
+//func endPrint() {
+//	if utils.NoPrintResult() {
+//		return
+//	}
+//	if runtime.GOOS == "windows" { // 如果是 Windows 系统，则需要按下 回车键 或 Ctrl+C 退出（避免通过双击运行时，测速完毕后直接关闭）
+//		fmt.Printf("按下 回车键 或 Ctrl+C 退出。")
+//		fmt.Scanln()
+//	}
+//}
 
 // 检查更新
-func checkUpdate() {
-	timeout := 10 * time.Second
-	client := http.Client{Timeout: timeout}
-	res, err := client.Get("https://api.xiu2.xyz/ver/cloudflarespeedtest.txt")
-	if err != nil {
-		return
-	}
-	// 读取资源数据 body: []byte
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return
-	}
-	// 关闭资源流
-	defer res.Body.Close()
-	if string(body) != version {
-		versionNew = string(body)
-	}
-}
+//func checkUpdate() {
+//	timeout := 10 * time.Second
+//	client := http.Client{Timeout: timeout}
+//	res, err := client.Get("https://api.xiu2.xyz/ver/cloudflarespeedtest.txt")
+//	if err != nil {
+//		return
+//	}
+//	// 读取资源数据 body: []byte
+//	body, err := io.ReadAll(res.Body)
+//	if err != nil {
+//		return
+//	}
+//	// 关闭资源流
+//	defer res.Body.Close()
+//	if string(body) != version {
+//		versionNew = string(body)
+//	}
+//}
+
+// Extract IPs and save to result.txt
+// func saveFormattedIPs(speedData utils.DownloadSpeedSet) {
+// 	file, err := os.Create("result.txt")
+// 	if err != nil {
+// 		fmt.Println("Error creating result.txt:", err)
+// 		return
+// 	}
+// 	defer file.Close()
+
+// 	formattedString := ""
+// 	for _, data := range speedData {
+// 		ip := data.IP.String()
+// 		formattedString += fmt.Sprintf("vless://bc24baea-3e5c-4107-a231-416cf00504fe@%s:443?encryption=none&security=tls&sni=pages-vless-a9f.pages.dev&fp=randomized&type=ws&host=pages-vless-a9f.pages.dev&path=/?ed=2560#%s\n", ip, ip)
+// 	}
+// 	formattedString = base64.StdEncoding.EncodeToString([]byte(formattedString))
+// 	_, err = file.WriteString(formattedString)
+// 	if err != nil {
+// 		fmt.Println("Error writing to result.txt:", err)
+// 		return
+// 	}
+// 	fmt.Println("Formatted IPs saved to result.txt")
+// }
+
+// 根据speedData在当前目录下生成clash配置文件vless-cf-test.yaml
+// func generateClashConfig(speedData utils.DownloadSpeedSet) {
+// 	file, err := os.Create("vless-cf-test.yaml")
+// 	if err != nil {
+// 		fmt.Println("Error creating vless-cf-test.yaml:", err)
+// 		return
+// 	}
+// 	defer file.Close()
+
+// 	clashProxyConfig := ""
+// 	clashSelectList := ""
+// 	for _, data := range speedData {
+// 		clashProxyConfig += fmt.Sprintf("  - {name: %s, server: %s, port: 443, client-fingerprint: randomized, type: vless, uuid: bc24baea-3e5c-4107-a231-416cf00504fe, tls: true, tfo: false, skip-cert-verify: false, servername: pages-vless-a9f.pages.dev, network: ws, ws-opts: {path: /, headers: {Host: pages-vless-a9f.pages.dev}}}\n", data.IP.String(), data.IP.String())
+// 		clashSelectList += fmt.Sprintf("\"%s\",", data.IP.String())
+// 	}
+// 	// 去除 clashSelectList 最后一个逗号
+// 	clashSelectList = clashSelectList[:len(clashSelectList)-1]
+// 	// 加载当前文件夹下的clash-template.yaml,并替换掉{proxiesConfigList}和{proxiesSelectList}，替换完之后写入vless-cf-test.yaml
+// 	clashTemplate, err := os.ReadFile("clash-template.yaml")
+// 	if err != nil {
+// 		fmt.Println("Error reading clash-template.yaml:", err)
+// 		return
+// 	}
+// 	clashTemplate = bytes.ReplaceAll(clashTemplate, []byte("{proxiesConfigList}"), []byte(clashProxyConfig))
+// 	clashTemplate = bytes.ReplaceAll(clashTemplate, []byte("{proxiesSelectList}"), []byte(clashSelectList))
+// 	// 如果vless-cf-test.yaml文件存在，则删除
+// 	if _, err := os.Stat("vless-cf-test.yaml"); err == nil {
+// 		os.Remove("vless-cf-test.yaml")
+// 	}
+// 	// 创建vless-cf-test.yaml
+// 	file, err = os.Create("vless-cf-test.yaml")
+// 	if err != nil {
+// 		fmt.Println("Error creating vless-cf-test.yaml:", err)
+// 		return
+// 	}
+// 	defer file.Close()
+// 	// 写入到vless-cf-test.yaml
+// 	_, err = file.Write(clashTemplate)
+// 	if err != nil {
+// 		return
+// 	}
+// 	fmt.Println("Clash config file generated successfully")
+
+// }

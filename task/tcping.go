@@ -60,25 +60,49 @@ func NewPing() *Ping {
 }
 
 func (p *Ping) Run() utils.PingDelaySet {
-	if len(p.ips) == 0 {
-		return p.csv
-	}
-	if Httping {
-		fmt.Printf("开始延迟测速（模式：HTTP, 端口：%d, 范围：%v ~ %v ms, 丢包：%.2f)\n", TCPPort, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
-	} else {
-		fmt.Printf("开始延迟测速（模式：TCP, 端口：%d, 范围：%v ~ %v ms, 丢包：%.2f)\n", TCPPort, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
-	}
-	for _, ip := range p.ips {
-		p.wg.Add(1)
-		p.control <- false
-		go p.start(ip)
-	}
-	p.wg.Wait()
-	p.bar.Done()
-	sort.Sort(p.csv)
-	return p.csv
-}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var data = make(utils.PingDelaySet, 0)
+	var control = make(chan bool, Routines)
+	validCount := 0
+	finished := false
 
+	for _, ip := range p.ips {
+		if finished {
+			break
+		}
+		control <- false
+		wg.Add(1)
+		go func(ip *net.IPAddr) {
+			defer wg.Done()
+			recv, totalDelay := p.checkConnection(ip)
+			mu.Lock()
+			if recv > 0 {
+				validCount++
+				data = append(data, utils.CloudflareIPData{
+					PingData: &utils.PingData{
+						IP:       ip,
+						Sended:   PingTimes,
+						Received: recv,
+						Delay:    totalDelay / time.Duration(recv),
+					},
+				})
+				if validCount >= utils.MaxIPCount { // 当找到足够数量的有效IP时，提前返回结果
+					finished = true
+				}
+			}
+			p.bar.Grow(1, fmt.Sprintf("%d", validCount))
+			mu.Unlock()
+			<-control
+		}(ip)
+	}
+	wg.Wait()
+	sort.Sort(data)
+	if len(data) > utils.MaxIPCount {
+		return data[:utils.MaxIPCount] // 确保返回的数据不超过指定数量
+	}
+	return data
+}
 func (p *Ping) start(ip *net.IPAddr) {
 	defer p.wg.Done()
 	p.tcpingHandler(ip)

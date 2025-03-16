@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	defaultOutput         = "result.csv"
-	maxDelay              = 9999 * time.Millisecond
-	minDelay              = 0 * time.Millisecond
-	maxLossRate   float32 = 1.0
+	defaultOutput             = "result.csv"
+	maxDelay                  = 9999 * time.Millisecond
+	minDelay                  = 0 * time.Millisecond
+	maxLossRate       float32 = 1.0
+	defaultMaxIPCount         = 200
 )
 
 var (
@@ -23,6 +24,7 @@ var (
 	InputMaxLossRate = maxLossRate
 	Output           = defaultOutput
 	PrintNum         = 10
+	MaxIPCount       = defaultMaxIPCount
 )
 
 // 是否打印测试结果
@@ -110,7 +112,10 @@ func (s PingDelaySet) FilterDelay() (data PingDelaySet) {
 		if v.Delay < InputMinDelay { // 平均延迟下限，延迟小于条件最小值时，不满足条件，跳过
 			continue
 		}
-		data = append(data, v) // 延迟满足条件时，添加到新数组中
+		data = append(data, v)       // 延迟满足条件时，添加到新数组中
+		if len(data) >= MaxIPCount { // 当找到足够数量的IP时，提前返回结果
+			return data
+		}
 	}
 	return
 }
